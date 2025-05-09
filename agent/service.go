@@ -48,13 +48,14 @@ func init() {
 		Type:        "string",
 		Description: "The content of the issue being created",
 	})
-
-	tools = []copilot.FunctionTool{
+	
+	// Example tools array including the "call_ai_model" tool
+	var tools = []copilot.FunctionTool{
 		{
 			Type: "function",
 			Function: copilot.Function{
 				Name:        "list_issues",
-				Description: "Fetch a list of issues from github.com for a given repository.  Users may specify the repository owner and the repository name separately, or they may specify it in the form {repository_owner}/{repository_name}, or in the form github.com/{repository_owner}/{repository_name}.",
+				Description: "Fetch a list of issues from github.com for a given repository. Users may specify the repository owner and the repository name separately, or they may specify it in the form {repository_owner}/{repository_name}, or in the form github.com/{repository_owner}/{repository_name}.",
 				Parameters: &jsonschema.Schema{
 					Type:       "object",
 					Properties: listProperties,
@@ -66,11 +67,37 @@ func init() {
 			Type: "function",
 			Function: copilot.Function{
 				Name:        "create_issue_dialog",
-				Description: "Creates a confirmation dialog in which the user can interact with in order to create an issue on a github.com repository.  Only one dialog should be created for each issue/repository combination.  Users may specify the repository owner and the repository name separately, or they may specify it in the form {repository_owner}/{repository_name}, or in the form github.com/{repository_owner}/{repository_name}.",
+				Description: "Creates a confirmation dialog in which the user can interact with in order to create an issue on a github.com repository. Only one dialog should be created for each issue/repository combination. Users may specify the repository owner and the repository name separately, or they may specify it in the form {repository_owner}/{repository_name}, or in the form github.com/{repository_owner}/{repository_name}.",
 				Parameters: &jsonschema.Schema{
 					Type:       "object",
 					Properties: createProperties,
 					Required:   []string{"repository_owner", "repository_name", "issue_title", "issue_body"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: copilot.Function{
+				Name:        "call_ai_model",
+				Description: "Dynamically calls either Copilot or ChatGPT based on the user's input. This function takes a service name ('copilot' or 'chatgpt'), a base prompt, and the user's query.",
+				Parameters: &jsonschema.Schema{
+					Type: "object",
+					Properties: map[string]*jsonschema.Schema{
+						"service_name": {
+							Type:        "string",
+							Description: "The target service to call, either 'copilot' or 'chatgpt'.",
+							Enum:        []string{"copilot", "chatgpt"},
+						},
+						"base_prompt": {
+							Type:        "string",
+							Description: "The initial prompt to be appended with the user's query.",
+						},
+						"user_query": {
+							Type:        "string",
+							Description: "The user's specific query to append to the base prompt.",
+						},
+					},
+					Required: []string{"service_name", "base_prompt", "user_query"},
 				},
 			},
 		},
@@ -346,8 +373,18 @@ func getFunctionCall(res *copilot.ChatCompletionsResponse) *copilot.ChatMessageF
 
 }
 
-// Function to dynamically call Copilot or ChatGPT based on the context
+// CallAIModel dynamically calls either Copilot or ChatGPT based on the context
 func (s *Service) CallAIModel(ctx context.Context, serviceName string, prompt string, userQuery string) (string, error) {
+	// Validate service name
+	validServices := map[string]string{
+		"copilot": "https://api.github.com/copilot/call",
+		"chatgpt": "https://api.openai.com/v1/engines/gpt-3.5-turbo/completions",
+	}
+	endpoint, ok := validServices[serviceName]
+	if !ok {
+		return "", errors.New("invalid service name: must be 'copilot' or 'chatgpt'")
+	}
+
 	// Append user query to the provided prompt
 	finalPrompt := fmt.Sprintf("%s\n\n%s", prompt, userQuery)
 
@@ -355,21 +392,9 @@ func (s *Service) CallAIModel(ctx context.Context, serviceName string, prompt st
 	payload := map[string]string{
 		"prompt": finalPrompt,
 	}
-
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	// Define the target endpoint based on the service name
-	var endpoint string
-	switch serviceName {
-	case "copilot":
-		endpoint = "https://api.github.com/copilot/call"
-	case "chatgpt":
-		endpoint = "https://api.openai.com/v1/engines/gpt-3.5-turbo/completions"
-	default:
-		return "", errors.New("unknown service name")
 	}
 
 	// Send the HTTP request
@@ -381,7 +406,11 @@ func (s *Service) CallAIModel(ctx context.Context, serviceName string, prompt st
 	// Add headers
 	req.Header.Set("Content-Type", "application/json")
 	if serviceName == "chatgpt" {
-		req.Header.Set("Authorization", "Bearer YOUR_OPENAI_API_KEY")
+		apiKey := os.Getenv("OPENAI_API_KEY")
+		if apiKey == "" {
+			return "", errors.New("missing API key: ensure OPENAI_API_KEY is set in the environment")
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
 	// Execute the request
@@ -392,11 +421,16 @@ func (s *Service) CallAIModel(ctx context.Context, serviceName string, prompt st
 	}
 	defer resp.Body.Close()
 
-	// Handle the response
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("received non-OK response: %s", resp.Status)
+	// Handle response errors
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", errors.New("unauthorized: please check your API key or token")
+	} else if resp.StatusCode == http.StatusServiceUnavailable {
+		return "", errors.New("service unavailable: try again later")
+	} else if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected error: %s", resp.Status)
 	}
 
+	// Decode the response
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("failed to decode response: %w", err)
