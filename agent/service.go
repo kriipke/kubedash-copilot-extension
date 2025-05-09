@@ -345,3 +345,68 @@ func getFunctionCall(res *copilot.ChatCompletionsResponse) *copilot.ChatMessageF
 	return funcCall
 
 }
+
+// Function to dynamically call Copilot or ChatGPT based on the context
+func (s *Service) CallAIModel(ctx context.Context, serviceName string, prompt string, userQuery string) (string, error) {
+	// Append user query to the provided prompt
+	finalPrompt := fmt.Sprintf("%s\n\n%s", prompt, userQuery)
+
+	// Prepare the request payload
+	payload := map[string]string{
+		"prompt": finalPrompt,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	// Define the target endpoint based on the service name
+	var endpoint string
+	switch serviceName {
+	case "copilot":
+		endpoint = "https://api.github.com/copilot/call"
+	case "chatgpt":
+		endpoint = "https://api.openai.com/v1/engines/gpt-3.5-turbo/completions"
+	default:
+		return "", errors.New("unknown service name")
+	}
+
+	// Send the HTTP request
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return "", fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	// Add headers
+	req.Header.Set("Content-Type", "application/json")
+	if serviceName == "chatgpt" {
+		req.Header.Set("Authorization", "Bearer YOUR_OPENAI_API_KEY")
+	}
+
+	// Execute the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Handle the response
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("received non-OK response: %s", resp.Status)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Extract the response content
+	responseContent, ok := result["content"].(string)
+	if !ok {
+		return "", errors.New("failed to extract content from response")
+	}
+
+	return responseContent, nil
+}
